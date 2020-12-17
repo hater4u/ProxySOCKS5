@@ -30,27 +30,28 @@ public class ProxyHandler {
     public void processMessage() throws IOException {
         switch (currStage) {
             case AUTH:
-                comm.authenticate();
-                currStage = SocksStage.CLIENT_COMM;
+                currStage = comm.authenticate();;
                 break;
             case CLIENT_COMM:
                 currStage = comm.getCommand();
                 break;
-            case CONN2SERV:
-                comm.sendToServer();
-                currStage = SocksStage.RELAY;
+//            case CONNECTION_TO_SERVER:
+//                comm.sendToServer();
+//                currStage = SocksStage.RELAY;
+//                break;
+            case RELAY_READ_FROM_CLIENT:
+                currStage = comm.sendToServer();
                 break;
-            case RELAY:
-                comm.relay();
-                currStage = SocksStage.CLIENT_COMM;
+            case RELAY_READ_FROM_SERVER:
+                currStage = comm.readFromServer();
+                break;
+            case RELAY_WRITE_TO_CLIENT:
+                closeConnection();
+                currStage = SocksStage.AUTH;
                 break;
         }
     }
 
-    public void sendClientDataToServer() throws IOException {
-        comm.relay();
-        currStage = SocksStage.CLIENT_COMM;
-    }
 
     public void readClientMessage(ByteBuffer buffer) throws IOException {
         buffer.clear();
@@ -58,6 +59,7 @@ public class ProxyHandler {
     }
 
     public void writeClientMessage(ByteBuffer buffer) throws IOException {
+//        buffer.flip();
         client.write(buffer);
     }
 
@@ -66,6 +68,10 @@ public class ProxyHandler {
     }
 
     public void finishConnectionToServer() throws IOException {
-        comm.sendToServer();
+        currStage = comm.finishConnection();
+    }
+
+    private void closeConnection() throws IOException {
+        client.close();
     }
 }
