@@ -1,5 +1,7 @@
 package ru.nsu.drozdov;
 
+import ru.nsu.drozdov.utils.MyDnsResolver;
+
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.channels.*;
@@ -9,6 +11,7 @@ import java.util.Set;
 public class SocksServer {
     private Integer proxyPort;
     private DatagramChannel datagramChannel;
+    private MyDnsResolver dnsResolver;
 
     public SocksServer(Integer port) {
         proxyPort = port;
@@ -23,8 +26,10 @@ public class SocksServer {
 
             datagramChannel = DatagramChannel.open();
             datagramChannel.configureBlocking(false);
-            DnsResolver dnsResolver = new DnsResolver();
-            datagramChannel.register(selector, SelectionKey.OP_READ, dnsResolver);
+            datagramChannel.register(selector, SelectionKey.OP_READ, this);
+
+
+            dnsResolver = new MyDnsResolver(datagramChannel);
 
 
             while (true) {
@@ -35,6 +40,7 @@ public class SocksServer {
                 while (iter.hasNext()) {
                     SelectionKey key = iter.next();
                     iter.remove();
+
                     if (key.isAcceptable()) {
                         acceptConnection(key);
                     }
@@ -45,7 +51,8 @@ public class SocksServer {
                         closeConnection(key);
                     }
                     if (key.isReadable() && key.readyOps() != SelectionKey.OP_WRITE) {
-                        handleMessage(key);
+                        if(key.attachment() instanceof ProxyHandler) handleMessage(key);
+                        else endResolving(key);
                     }
                 }
             }
@@ -62,15 +69,21 @@ public class SocksServer {
 
         SocketChannel client = serverSocketChannel.accept();
         client.configureBlocking(false);
-        ProxyHandler proxyHandler = new ProxyHandler(client, this.datagramChannel, selector);
+        ProxyHandler proxyHandler = new ProxyHandler(client, dnsResolver, selector, key);
 
         client.register(selector, SelectionKey.OP_READ, proxyHandler);
     }
 
     private void handleMessage(SelectionKey key) throws IOException {
         ProxyHandler proxyHandler = (ProxyHandler) key.attachment();
+        proxyHandler.updateKey(key);
         proxyHandler.processMessage();
     }
+
+    private void endResolving(SelectionKey key) throws IOException {
+        dnsResolver.handleIp();
+    }
+
 
     private void finishConnection(SelectionKey key) throws IOException {
         ProxyHandler proxyHandler = (ProxyHandler) key.attachment();

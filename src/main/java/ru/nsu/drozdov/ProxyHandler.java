@@ -1,30 +1,34 @@
 package ru.nsu.drozdov;
 
+import ru.nsu.drozdov.utils.MyDnsResolver;
+import ru.nsu.drozdov.utils.SocksConstants;
 import ru.nsu.drozdov.utils.SocksStage;
 
 import java.io.IOException;
+import java.net.InetAddress;
 import java.net.SocketAddress;
 import java.nio.ByteBuffer;
-import java.nio.channels.ClosedChannelException;
-import java.nio.channels.DatagramChannel;
-import java.nio.channels.Selector;
-import java.nio.channels.SocketChannel;
+import java.nio.channels.*;
 
 public class ProxyHandler {
     private SocketChannel client;
-    private DatagramChannel datagramDNSChannel;
+    private MyDnsResolver dnsResolver;
     private Socks5Model comm;
     private Selector selector;
-
-    private ByteBuffer buffer = ByteBuffer.allocate(512);
+    private SelectionKey key;
 
     private SocksStage currStage = SocksStage.AUTH;
 
-    public ProxyHandler(SocketChannel clientSocket, DatagramChannel datagramChannel, Selector selector) {
+    public ProxyHandler(SocketChannel clientSocket, MyDnsResolver dnsResolver, Selector selector, SelectionKey key) {
         client = clientSocket;
-        datagramDNSChannel = datagramChannel;
+        this.dnsResolver = dnsResolver;
         comm = new Socks5Model(this);
         this.selector = selector;
+        this.key = key;
+    }
+
+    public void updateKey(SelectionKey key){
+        this.key = key;
     }
 
     public void processMessage() throws IOException {
@@ -35,10 +39,6 @@ public class ProxyHandler {
             case CLIENT_COMM:
                 currStage = comm.getCommand();
                 break;
-//            case CONNECTION_TO_SERVER:
-//                comm.sendToServer();
-//                currStage = SocksStage.RELAY;
-//                break;
             case RELAY_READ_FROM_CLIENT:
                 currStage = comm.sendToServer();
                 break;
@@ -59,8 +59,21 @@ public class ProxyHandler {
     }
 
     public void writeClientMessage(ByteBuffer buffer) throws IOException {
-//        buffer.flip();
         client.write(buffer);
+    }
+
+    public boolean resolveName(String dnsName) throws IOException {
+        return dnsResolver.resolve(dnsName, key);
+    }
+
+    public void setInetAddress(InetAddress address) throws IOException {
+        comm.setAddressAndConnect(address);
+    }
+
+    public void sendErrorToClient(byte replyCode) throws IOException {
+        currStage = SocksStage.CLIENT_COMM;
+        byte[] buffer = comm.generateReplyCommandMessage(replyCode, (byte)0x01, SocksConstants.VOID_IP, SocksConstants.VOID_PORT);
+        client.write(ByteBuffer.wrap(buffer));
     }
 
     public void registerSocketChannel(SocketChannel socketChannel, int ops) throws ClosedChannelException {
@@ -71,7 +84,8 @@ public class ProxyHandler {
         currStage = comm.finishConnection();
     }
 
-    private void closeConnection() throws IOException {
+    public void closeConnection() throws IOException {
         client.close();
     }
 }
+

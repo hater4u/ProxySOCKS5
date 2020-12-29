@@ -11,6 +11,7 @@ import java.net.SocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.SocketChannel;
+import java.nio.charset.StandardCharsets;
 
 public class Socks5Model {
     private ProxyHandler proxyHandler;
@@ -46,6 +47,7 @@ public class Socks5Model {
         if (!checkVersion(SocksVersion)) {
 //            throw new IOException("Invalid SOCKS version, for connection required Version SOCKS5");
             sendToClient(SocksConstants.AUTH_MESS_REFUSE);
+            proxyHandler.closeConnection();
             return SocksStage.AUTH;
         }
 
@@ -53,6 +55,7 @@ public class Socks5Model {
         if ((nMethods == (byte) 0x00) || (commBuffer.limit() - 2 != (int) nMethods)) {
 //            throw new IOException("Invalid number of methods");
             sendToClient(SocksConstants.AUTH_MESS_REFUSE);
+            proxyHandler.closeConnection();
             return SocksStage.AUTH;
         }
 
@@ -66,17 +69,18 @@ public class Socks5Model {
         }
 //        throw new IOException("proxy does not support these methods");
         sendToClient(SocksConstants.AUTH_MESS_REFUSE);
+        proxyHandler.closeConnection();
         return SocksStage.AUTH;
     }
 
-    private byte[] generateReplyCommandMessage(byte replyCode, byte[] address, byte[] pt){
+    public byte[] generateReplyCommandMessage(byte replyCode, byte addressType, byte[] address, byte[] pt){
         int buffSize = 4 + address.length + 2;
         byte[] REPLY = new byte[buffSize];
 
         REPLY[0] = 0x05;
         REPLY[1] = replyCode;
         REPLY[2] = 0x00;        // Reserved	'00'
-        REPLY[3] = 0x01;        // DOMAIN NAME Address Type IP v4
+        REPLY[3] = addressType;        // DOMAIN NAME Address Type IP v4
         for(int i = 0; i < address.length; i++) REPLY[4+i] = address[i];
         REPLY[buffSize-2] = pt[0];
         REPLY[buffSize-1] = pt[1];
@@ -92,21 +96,25 @@ public class Socks5Model {
         proxyHandler.registerSocketChannel(server, SelectionKey.OP_CONNECT);
     }
 
+    public void setAddressAndConnect(InetAddress inetAddress) throws IOException {
+        serverAddress = new InetSocketAddress(inetAddress, AddressUtility.calcPort(dstPort[0], dstPort[1]));
+        connectToServer();
+    }
+
     public SocksStage getCommand() throws IOException {
         proxyHandler.readClientMessage(commBuffer);
         commBuffer.flip();
 
         byte SocksVersion = commBuffer.get();
         if (!checkVersion(SocksVersion)) {
-//            throw new IOException("Invalid SOCKS version, for connection required Version SOCKS5");
-            sendToClient(generateReplyCommandMessage((byte)0xFF, SocksConstants.VOID_IP, SocksConstants.VOID_PORT));
+            sendToClient(generateReplyCommandMessage((byte)0xFF, SocksConstants.ATYPE_IPV4, SocksConstants.VOID_IP, SocksConstants.VOID_PORT));
             return SocksStage.AUTH;
         }
 
         byte command = commBuffer.get();
         if (command != (byte)0x01) {
 
-            sendToClient(generateReplyCommandMessage((byte)0x07, SocksConstants.VOID_IP, SocksConstants.VOID_PORT));
+            sendToClient(generateReplyCommandMessage((byte)0x07, SocksConstants.ATYPE_IPV4, SocksConstants.VOID_IP, SocksConstants.VOID_PORT));
             return SocksStage.AUTH;
         }
 
@@ -124,7 +132,7 @@ public class Socks5Model {
 
                         InetAddress inetAddress = AddressUtility.calcInetAddress(ipv4);
                         if(inetAddress == null){
-                            sendToClient(generateReplyCommandMessage((byte)0x04, SocksConstants.VOID_IP, SocksConstants.VOID_PORT));
+                            sendToClient(generateReplyCommandMessage((byte)0x04, SocksConstants.ATYPE_IPV4, SocksConstants.VOID_IP, SocksConstants.VOID_PORT));
                             return SocksStage.AUTH;
                         }
 
@@ -133,21 +141,25 @@ public class Socks5Model {
                         return SocksStage.CONNECTION_TO_SERVER;
 
                     case SocksConstants.ATYPE_DOMAINNAME:
-                        // DNS
-                        return SocksStage.CLIENT_COMM;
+                        byte size = commBuffer.get();
+                        byte[] dnsBuffer = new byte[size];
+
+                        for(int i = 0; i < size; i++) dnsBuffer[i] = commBuffer.get();
+                        commBuffer.get(dstPort, 0, 2);
+
+                        if(proxyHandler.resolveName(new String(dnsBuffer, StandardCharsets.US_ASCII))) return SocksStage.CLIENT_COMM;
+                        return SocksStage.CONNECTION_TO_SERVER;
 
                     case SocksConstants.ATYPE_IPV6:
                     default:
-//                        throw new IOException("Unsupported Address type");
-                        sendToClient(generateReplyCommandMessage((byte)0x08, SocksConstants.VOID_IP, SocksConstants.VOID_PORT));
+                        sendToClient(generateReplyCommandMessage((byte)0x08, SocksConstants.ATYPE_IPV4, SocksConstants.VOID_IP, SocksConstants.VOID_PORT));
                         return SocksStage.AUTH;
                 }
 
             case SocksConstants.SC_BIND:
             case SocksConstants.SC_UDP:
             default:
-//                throw new IOException("Unknown command");
-                sendToClient(generateReplyCommandMessage((byte)0x07, SocksConstants.VOID_IP, SocksConstants.VOID_PORT));
+                sendToClient(generateReplyCommandMessage((byte)0x07, SocksConstants.ATYPE_IPV4, SocksConstants.VOID_IP, SocksConstants.VOID_PORT));
                 return SocksStage.AUTH;
         }
     }
@@ -158,17 +170,19 @@ public class Socks5Model {
             if(!server.finishConnect()) throw new IOException("Can't connect to Server");
 
         } catch (IOException e) {
-            sendToClient(generateReplyCommandMessage((byte)0x05, ipv4, dstPort));
+            sendToClient(generateReplyCommandMessage((byte)0x05, SocksConstants.ATYPE_IPV4, ipv4, dstPort));
             return SocksStage.AUTH;
         }
 
-        sendToClient(generateReplyCommandMessage((byte)0x00, ipv4, dstPort));
+        sendToClient(generateReplyCommandMessage((byte)0x00, SocksConstants.ATYPE_IPV4, ipv4, dstPort));
         return SocksStage.RELAY_READ_FROM_CLIENT;
     }
 
     public SocksStage sendToServer() throws IOException {
         proxyHandler.readClientMessage(dataBuffer);
         dataBuffer.flip();
+
+        System.out.println(new String(dataBuffer.array(), StandardCharsets.US_ASCII));
 
         proxyHandler.registerSocketChannel(server, SelectionKey.OP_READ);
         server.write(dataBuffer);
